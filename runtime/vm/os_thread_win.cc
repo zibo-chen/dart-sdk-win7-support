@@ -154,9 +154,28 @@ ThreadId OSThread::ThreadIdFromIntPtr(intptr_t id) {
 }
 
 bool OSThread::GetCurrentStackBounds(uword* lower, uword* upper) {
-  // PULONG and uword are sometimes different fundamental types.
-  ::GetCurrentThreadStackLimits(reinterpret_cast<PULONG_PTR>(lower),
-                                reinterpret_cast<PULONG_PTR>(upper));
+  static const auto get_stack_limits =
+      reinterpret_cast<decltype(&GetCurrentThreadStackLimits)>(GetProcAddress(
+          GetModuleHandleW(L"kernel32.dll"), "GetCurrentThreadStackLimits"));
+  if (get_stack_limits != nullptr) {
+    get_stack_limits(reinterpret_cast<PULONG_PTR>(lower),
+                     reinterpret_cast<PULONG_PTR>(upper));
+    return true;
+  }
+  // Windows 7: use the pre-Windows-8 Dart stack-bounds implementation.
+  // StackLimit describes committed pages, not the complete reserved stack.
+  NT_TIB* tib = reinterpret_cast<NT_TIB*>(NtCurrentTeb());
+  *upper = reinterpret_cast<uword>(tib->StackBase);
+  MEMORY_BASIC_INFORMATION stack_info = {};
+  if (VirtualQuery(&stack_info, &stack_info, sizeof(stack_info)) <
+      sizeof(stack_info)) {
+    return false;
+  }
+  *lower = reinterpret_cast<uword>(stack_info.AllocationBase);
+  ASSERT(*upper > *lower);
+  ASSERT((*upper - *lower) >= (4u * 0x1000));
+  // Exclude the guard and stack-overflow handling pages, as in Dart 3.5.
+  *lower += 4 * 0x1000;
   return true;
 }
 

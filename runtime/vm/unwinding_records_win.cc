@@ -115,17 +115,9 @@ void UnwindingRecords::RegisterExecutablePage(Page* page) {
            unwinding_record_offset) CodeRangeUnwindingRecord();
   InitUnwindingRecord(unwinding_record_offset, record, page->memory_->size());
   RELEASE_ASSERT(record->magic == kUnwindingRecordMagic);
-  DWORD status = RtlAddGrowableFunctionTable(
-      /*DynamicTable=*/&record->dynamic_table,
-      /*FunctionTable=*/
-      reinterpret_cast<PRUNTIME_FUNCTION>(record->runtime_function),
-      /*EntryCount=*/record->runtime_function_count,
-      /*MaximumEntryCount=*/record->runtime_function_count,
-      /*RangeBase=*/page->memory_->start(),
-      /*RangeEnd=*/page->memory_->end());
-  if (status != 0) {
-    FATAL("Failed to add growable function table: 0x%x\n", status);
-  }
+  UnwindingRecordsPlatform::RegisterExecutableMemory(
+      reinterpret_cast<void*>(page->memory_->start()), page->memory_->size(),
+      record, &record->dynamic_table);
 }
 
 void UnwindingRecords::UnregisterExecutablePage(Page* page) {
@@ -137,7 +129,7 @@ void UnwindingRecords::UnregisterExecutablePage(Page* page) {
           reinterpret_cast<uint8_t*>(page->memory_->start()) +
           unwinding_record_offset);
   RELEASE_ASSERT(record->magic == kUnwindingRecordMagic);
-  RtlDeleteGrowableFunctionTable(record->dynamic_table);
+  UnwindingRecordsPlatform::UnregisterDynamicTable(record->dynamic_table);
 }
 #endif  // defined(UNWINDING_RECORDS_WINDOWS_HOST)
 
