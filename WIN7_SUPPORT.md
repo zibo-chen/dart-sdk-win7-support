@@ -4,12 +4,18 @@ Base: `fc3da898ea1664b8a8633f6ec03d2c2290bb3d01`, the Dart revision pinned by
 Flutter 3.44.1. This branch is a companion to
 `zibo-chen/flutter-win7-support`, branch `medivh/win7-3.44.1`.
 
-Status: the runtime and Flutter engine compile and link on Windows 2022 in
-companion Actions run `41180227958`. Its relative-link probe initially used
-forward slashes; control run `41186016069` reproduced the same errno 123 using
-the official Dart 3.12.1 SDK and passed with native Windows separators. The
-fixture is corrected; the complete probe and Windows 7 acceptance remain
-pending. This is not a supported Dart SDK distribution.
+Status: source-built Dart 3.12.1 and the Flutter engine compile and link on
+Windows 2022. The complete standalone runtime probe passes there in companion
+run `41186401142`. A Flutter release app using Dart commit
+`a6ed413da4b5690ec3e05f347af1400170d2a2f3` passes first-frame rendering,
+Unicode file I/O, hostname, loopback HTTP, isolate exception stacks and FFI on
+Windows 7 SP1 x64. Keyboard/button input and normal exit are visually recorded
+by the companion's [acceptance evidence](https://github.com/zibo-chen/flutter-win7-support/blob/medivh/win7-3.44.1/win7/evidence/2026-10-31-win7/acceptance.json).
+
+This is not a supported standalone Dart SDK distribution. The full standalone
+probe's long-path/symlink cases were run on Windows 2022, not on Win7; the Win7
+result above is the Flutter release application. Business plugins, IME, other
+hardware and long-running stability remain separate acceptance work.
 
 Changes retain the modern Windows behavior when its API is available:
 
