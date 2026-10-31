@@ -29,6 +29,26 @@ intptr_t UnwindingRecordsPlatform::SizeInBytes() {
 // as it is the only client of these methods (e.g., _not_ in gen_snapshot).
 #if defined(UNWINDING_RECORDS_WINDOWS_HOST)
 
+namespace {
+
+using AddGrowableTable = decltype(&RtlAddGrowableFunctionTable);
+using DeleteGrowableTable = decltype(&RtlDeleteGrowableFunctionTable);
+
+const AddGrowableTable add_growable_table = reinterpret_cast<AddGrowableTable>(
+    GetProcAddress(GetModuleHandleW(L"ntdll.dll"),
+                   "RtlAddGrowableFunctionTable"));
+const DeleteGrowableTable delete_growable_table =
+    reinterpret_cast<DeleteGrowableTable>(
+        GetProcAddress(GetModuleHandleW(L"ntdll.dll"),
+                       "RtlDeleteGrowableFunctionTable"));
+
+struct RegisteredFunctionTable {
+  void* growable = nullptr;
+  PRUNTIME_FUNCTION fixed = nullptr;
+};
+
+}  // namespace
+
 void UnwindingRecordsPlatform::RegisterExecutableMemory(
     void* start,
     intptr_t size,
@@ -48,21 +68,36 @@ void UnwindingRecordsPlatform::RegisterExecutableMemory(
   RELEASE_ASSERT(record->magic == kUnwindingRecordMagic);
   uword start_num = reinterpret_cast<intptr_t>(start);
   uword end_num = start_num + size;
-  DWORD status = RtlAddGrowableFunctionTable(
-      pp_dynamic_table,
-      /*FunctionTable=*/
-      reinterpret_cast<PRUNTIME_FUNCTION>(record->runtime_function),
-      /*EntryCount=*/record->runtime_function_count,
-      /*MaximumEntryCount=*/record->runtime_function_count,
-      /*RangeBase=*/start_num,
-      /*RangeEnd=*/end_num);
-  if (status != 0) {
-    FATAL("Failed to add growable function table: 0x%x\n", status);
+  auto* table = new RegisteredFunctionTable();
+  auto* functions =
+      reinterpret_cast<PRUNTIME_FUNCTION>(record->runtime_function);
+  if (add_growable_table != nullptr && delete_growable_table != nullptr) {
+    DWORD status = add_growable_table(
+        &table->growable, functions, record->runtime_function_count,
+        record->runtime_function_count, start_num, end_num);
+    if (status != 0) {
+      FATAL("Failed to add growable function table: 0x%x\n", status);
+    }
+  } else {
+    // The complete entry array is known at registration time. Windows 7's
+    // fixed-size API can describe the same range without a growable table.
+    table->fixed = functions;
+    if (!RtlAddFunctionTable(functions, record->runtime_function_count,
+                             start_num)) {
+      FATAL("Failed to add function table: 0x%x\n", GetLastError());
+    }
   }
+  *pp_dynamic_table = table;
 }
 
 void UnwindingRecordsPlatform::UnregisterDynamicTable(void* p_dynamic_table) {
-  RtlDeleteGrowableFunctionTable(p_dynamic_table);
+  auto* table = static_cast<RegisteredFunctionTable*>(p_dynamic_table);
+  if (table->fixed != nullptr) {
+    RELEASE_ASSERT(RtlDeleteFunctionTable(table->fixed));
+  } else {
+    delete_growable_table(table->growable);
+  }
+  delete table;
 }
 
 #endif  // defined(UNWINDING_RECORDS_WINDOWS_HOST)

@@ -7,6 +7,7 @@
 
 #include <functional>
 #include <memory>
+#include <string>
 #include <utility>
 
 // clang-format off
@@ -385,6 +386,53 @@ static bool IsDeviceNamespacePrefixed(const std::unique_ptr<wchar_t[]>& path) {
                  kDeviceNamespacePrefixLength) == 0;
 }
 
+// pathcch.dll is unavailable on Windows 7. Keep its modern implementation
+// when present, without introducing a load-time dependency on the DLL.
+static HMODULE PathCchModule() {
+  static HMODULE module = []() -> HMODULE {
+    wchar_t path[MAX_PATH];
+    UINT length = GetSystemDirectoryW(path, MAX_PATH);
+    if (length == 0 || length + 13 >= MAX_PATH) return nullptr;
+    wcscat_s(path, L"\\pathcch.dll");
+    return LoadLibraryW(path);
+  }();
+  return module;
+}
+
+static std::wstring WithoutExtendedPathPrefix(const wchar_t* path) {
+  if (wcsncmp(path, L"\\\\?\\UNC\\", 8) == 0) {
+    return std::wstring(L"\\\\") + (path + 8);
+  }
+  if (wcsncmp(path, kLongPathPrefix, kLongPathPrefixLength) == 0) {
+    return path + kLongPathPrefixLength;
+  }
+  return path;
+}
+
+static std::unique_ptr<wchar_t[]> Win7CanonicalPath(const wchar_t* path) {
+  auto copy_path = [](const wchar_t* value) {
+    size_t length = wcslen(value) + 1;
+    auto result = std::make_unique<wchar_t[]>(length);
+    wcscpy_s(result.get(), length, value);
+    return result;
+  };
+  // Device namespaces must not be interpreted as normal filesystem paths.
+  if (wcsncmp(path, kDeviceNamespacePrefix, kDeviceNamespacePrefixLength) ==
+      0) {
+    return copy_path(path);
+  }
+  // Remove an extended prefix while resolving dot components; add it back
+  // afterwards so Unicode paths longer than MAX_PATH remain usable.
+  auto ordinary = copy_path(WithoutExtendedPathPrefix(path).c_str());
+  auto absolute = ConvertToAbsolutePath(ordinary);
+  if (absolute == nullptr) return nullptr;
+  const bool unc = wcsncmp(absolute.get(), L"\\\\", 2) == 0;
+  const std::wstring result =
+      unc ? std::wstring(L"\\\\?\\UNC\\") + (absolute.get() + 2)
+          : std::wstring(kLongPathPrefix) + absolute.get();
+  return copy_path(result.c_str());
+}
+
 // Converts the given UTF8 path to wide char '\\?\'-prefix absolute path.
 //
 // Note that some WinAPI functions (like SetCurrentDirectoryW) are always
@@ -399,10 +447,17 @@ std::unique_ptr<wchar_t[]> ToWinAPIPath(const char* utf8_path) {
     return std::unique_ptr<wchar_t[]>(nullptr);
   }
 
+  static const auto canonicalize =
+      reinterpret_cast<decltype(&PathAllocCanonicalize)>(
+          PathCchModule() == nullptr
+              ? nullptr
+              : GetProcAddress(PathCchModule(), "PathAllocCanonicalize"));
+  if (canonicalize == nullptr) {
+    return Win7CanonicalPath(abs_path.get());
+  }
   PWSTR canonical_path;
-  if (PathAllocCanonicalize(abs_path.get(),
-                            PATHCCH_ENSURE_IS_EXTENDED_LENGTH_PATH,
-                            &canonical_path) != S_OK) {
+  if (canonicalize(abs_path.get(), PATHCCH_ENSURE_IS_EXTENDED_LENGTH_PATH,
+                   &canonical_path) != S_OK) {
     return std::unique_ptr<wchar_t[]>(nullptr);
   }
   auto result = std::unique_ptr<wchar_t[]>(wcsdup(canonical_path));
@@ -599,30 +654,67 @@ bool File::CreateLink(Namespace* namespc,
     wcscpy_s(target_path.get(), target_path_max_length, name.get());
 
     // 2. target_path := remove_file(target_path)
-    HRESULT remove_result =
-        PathCchRemoveFileSpec(target_path.get(), target_path_max_length);
-    if (remove_result == S_FALSE) {
-      // If the file component could not be removed, then `name` is
-      // top-level, like "C:\" or "/". Attempts to create files at those paths
-      // will fail with ERROR_ACCESS_DENIED.
-      SetLastError(ERROR_ACCESS_DENIED);
-      return false;
-    } else if (remove_result != S_OK) {
-      SetLastError(remove_result);
-      return false;
-    }
+    static const auto remove_file_spec =
+        reinterpret_cast<decltype(&PathCchRemoveFileSpec)>(
+            PathCchModule() == nullptr
+                ? nullptr
+                : GetProcAddress(PathCchModule(), "PathCchRemoveFileSpec"));
+    static const auto combine = reinterpret_cast<decltype(&PathCchCombineEx)>(
+        PathCchModule() == nullptr
+            ? nullptr
+            : GetProcAddress(PathCchModule(), "PathCchCombineEx"));
+    if (remove_file_spec == nullptr || combine == nullptr) {
+      std::wstring parent = WithoutExtendedPathPrefix(name.get());
+      size_t separator = parent.find_last_of(L"\\/");
+      if (separator == std::wstring::npos || separator == parent.size() - 1) {
+        SetLastError(ERROR_ACCESS_DENIED);
+        return false;
+      }
+      parent.resize(separator + 1);
+      if (target[0] == L'\\' || target[0] == L'/') {
+        // A rooted target is relative to the drive or UNC share root.
+        if (parent.size() >= 2 && parent[1] == L':') {
+          parent.resize(2);
+        } else if (parent.compare(0, 2, L"\\\\") == 0) {
+          size_t server_end = parent.find(L'\\', 2);
+          size_t share_end = parent.find(L'\\', server_end + 1);
+          parent.resize(share_end == std::wstring::npos ? parent.size()
+                                                        : share_end);
+        }
+      } else if (wcslen(target.get()) >= 2 && target[1] == L':') {
+        parent.clear();
+      }
+      auto candidate = Win7CanonicalPath((parent + target.get()).c_str());
+      if (candidate == nullptr) return false;
+      target_is_directory =
+          File::GetType(candidate.get(), /*follow_links=*/true) == kIsDirectory;
+    } else {
+      HRESULT remove_result =
+          remove_file_spec(target_path.get(), target_path_max_length);
+      if (remove_result == S_FALSE) {
+        // If the file component could not be removed, then `name` is
+        // top-level, like "C:\" or "/". Attempts to create files at those paths
+        // will fail with ERROR_ACCESS_DENIED.
+        SetLastError(ERROR_ACCESS_DENIED);
+        return false;
+      } else if (remove_result != S_OK) {
+        SetLastError(remove_result);
+        return false;
+      }
 
-    // 3. target_path := combine(target_path, target)
-    HRESULT combine_result = PathCchCombineEx(
-        target_path.get(), target_path_max_length, target_path.get(),
-        target.get(), PATHCCH_ALLOW_LONG_PATHS);
-    if (combine_result != S_OK) {
-      SetLastError(combine_result);
-      return false;
-    }
+      // 3. target_path := combine(target_path, target)
+      HRESULT combine_result =
+          combine(target_path.get(), target_path_max_length, target_path.get(),
+                  target.get(), PATHCCH_ALLOW_LONG_PATHS);
+      if (combine_result != S_OK) {
+        SetLastError(combine_result);
+        return false;
+      }
 
-    target_is_directory =
-        File::GetType(target_path.get(), /*follow_links=*/true) == kIsDirectory;
+      target_is_directory =
+          File::GetType(target_path.get(), /*follow_links=*/true) ==
+          kIsDirectory;
+    }
   }
 
   DWORD flags = SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;

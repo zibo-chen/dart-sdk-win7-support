@@ -320,8 +320,21 @@ bool Platform::LocalHostname(char* buffer, intptr_t buffer_length) {
   // 256 is max length per https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-gethostnamew#remarks
   const int HOSTNAME_MAXLENGTH = 256;
   wchar_t hostname_w[HOSTNAME_MAXLENGTH];
-  if (GetHostNameW(hostname_w, HOSTNAME_MAXLENGTH) != 0) {
-    return false;
+  // GetHostNameW was introduced in Windows 8. Resolve it at runtime so a
+  // Windows 7 process can load, preserving the Unicode implementation on
+  // newer systems. GetComputerNameExW also preserves Unicode on Windows 7.
+  static const auto get_hostname_w = reinterpret_cast<decltype(&GetHostNameW)>(
+      GetProcAddress(GetModuleHandleW(L"ws2_32.dll"), "GetHostNameW"));
+  if (get_hostname_w != nullptr) {
+    if (get_hostname_w(hostname_w, HOSTNAME_MAXLENGTH) != 0) {
+      return false;
+    }
+  } else {
+    DWORD hostname_length = HOSTNAME_MAXLENGTH;
+    if (!GetComputerNameExW(ComputerNameDnsHostname, hostname_w,
+                            &hostname_length)) {
+      return false;
+    }
   }
   return WideCharToMultiByte(CP_UTF8, 0, hostname_w, -1, buffer, buffer_length,
                              nullptr, nullptr) != 0;
