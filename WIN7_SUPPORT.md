@@ -4,8 +4,12 @@ Base: `fc3da898ea1664b8a8633f6ec03d2c2290bb3d01`, the Dart revision pinned by
 Flutter 3.44.1. This branch is a companion to
 `zibo-chen/flutter-win7-support`, branch `medivh/win7-3.44.1`.
 
-Status: source changes prepared; Windows compilation and Windows 7 runtime
-acceptance are pending. This is not a supported Dart SDK distribution.
+Status: the runtime and Flutter engine compile and link on Windows 2022 in
+companion Actions run `41180227958`. Its relative-link probe initially used
+forward slashes; control run `41186016069` reproduced the same errno 123 using
+the official Dart 3.12.1 SDK and passed with native Windows separators. The
+fixture is corrected; the complete probe and Windows 7 acceptance remain
+pending. This is not a supported Dart SDK distribution.
 
 Changes retain the modern Windows behavior when its API is available:
 

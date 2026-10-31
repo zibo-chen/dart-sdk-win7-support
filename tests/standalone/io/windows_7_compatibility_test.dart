@@ -15,7 +15,12 @@ Future<void> main() async {
     final target = await Directory('${directory.path}/中文').create();
     await File('${target.path}/probe.txt').writeAsString('文件与相对链接');
     final child = await Directory('${directory.path}/child').create();
-    final link = await Link('${child.path}/relative').create('../中文');
+    // Windows preserves the relative reparse target rather than translating
+    // forward slashes. The official Dart 3.12.1 SDK requires native separators
+    // here as well (Flutter companion control run 41186016069).
+    final link = await Link(
+      '${child.path}/relative',
+    ).create('..${Platform.pathSeparator}中文');
     final result = await File('${link.path}/probe.txt').readAsString();
     if (result != '文件与相对链接') throw StateError('Relative directory link failed');
     final longDirectory = await Directory(
